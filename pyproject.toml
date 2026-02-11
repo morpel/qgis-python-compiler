@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "Cython>=3.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yourmodule"
+version = "0.1.0"
+requires-python = ">=3.10"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["yourmodule"]
+
+[tool.setuptools.ext_modules]
+# not supported directly; defined via setup.py below
