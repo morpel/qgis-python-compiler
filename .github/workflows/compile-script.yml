@@ -1,0 +1,127 @@
+# .github/workflows/compile-script.yml
+name: Compile a Python script to a compiled module (Cython wheel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      script_path:
+        description: "Path to the .py script in the repo (e.g. tools/secret_logic.py)"
+        required: true
+        type: string
+      module_name:
+        description: "Python module name to build (e.g. secret_logic). No spaces."
+        required: true
+        type: string
+      package_name:
+        description: "Wheel/package name (e.g. secret-logic). Must be a valid PyPI name."
+        required: true
+        type: string
+      version:
+        description: "Wheel version (e.g. 0.1.0)"
+        required: true
+        type: string
+      python_versions:
+        description: 'JSON list of Python versions (e.g. ["3.10","3.11"])'
+        required: false
+        default: '["3.10","3.11","3.12"]'
+        type: string
+
+jobs:
+  build:
+    name: ${{ matrix.os }} py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ${{ fromJSON(inputs.python_versions) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Validate inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${{ inputs.script_path }}" =~ \.py$ ]]; then
+            echo "script_path must end with .py" >&2
+            exit 1
+          fi
+          if [[ ! -f "${{ inputs.script_path }}" ]]; then
+            echo "Script not found: ${{ inputs.script_path }}" >&2
+            exit 1
+          fi
+          if [[ ! "${{ inputs.module_name }}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "Invalid module_name: ${{ inputs.module_name }}" >&2
+            exit 1
+          fi
+          if [[ ! "${{ inputs.package_name }}" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]]; then
+            echo "Invalid package_name: ${{ inputs.package_name }}" >&2
+            exit 1
+          fi
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build wheel setuptools cython
+
+      - name: Generate ephemeral build package
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _dynbuild
+          mkdir -p _dynbuild/src/dynpkg
+
+          # Copy the user script into the package as <module_name>.py
+          cp "${{ inputs.script_path }}" "_dynbuild/src/dynpkg/${{ inputs.module_name }}.py"
+
+          # __init__.py to expose it (optional)
+          cat > _dynbuild/src/dynpkg/__init__.py << 'EOF'
+          # dynamic package init
+          EOF
+
+          # setup.py using Cython to build an extension module dynpkg.<module_name>
+          cat > _dynbuild/setup.py << EOF
+          from setuptools import setup, Extension
+          from Cython.Build import cythonize
+
+          ext_modules = cythonize(
+              [
+                  Extension(
+                      "dynpkg.${{ inputs.module_name }}",
+                      sources=["src/dynpkg/${{ inputs.module_name }}.py"],
+                  )
+              ],
+              compiler_directives={"language_level": "3"},
+          )
+
+          setup(
+              name="${{ inputs.package_name }}",
+              version="${{ inputs.version }}",
+              package_dir={"": "src"},
+              packages=["dynpkg"],
+              ext_modules=ext_modules,
+          )
+          EOF
+
+          # pyproject.toml for PEP517 builds
+          cat > _dynbuild/pyproject.toml << EOF
+          [build-system]
+          requires = ["setuptools>=68", "wheel", "Cython>=3.0"]
+          build-backend = "setuptools.build_meta"
+          EOF
+
+      - name: Build wheel
+        working-directory: _dynbuild
+        run: |
+          python -m build --wheel
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ inputs.module_name }}-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: _dynbuild/dist/*.whl
